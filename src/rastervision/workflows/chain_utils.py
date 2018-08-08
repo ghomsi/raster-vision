@@ -1,8 +1,11 @@
 from os.path import join
+import copy
 
 from rastervision.workflows.config_utils import (
-    make_classification_geotiff_geojson_scene, make_compute_stats,
-    make_make_chips, make_train, make_predict, make_eval)
+    make_geotiff_geojson_scene, make_compute_stats,
+    make_make_chips, make_train,
+    make_predict, make_predict, make_eval, make_stats_uri,
+    ClassificationGeoJSONOptions, OD, CL)
 from rastervision.utils.files import save_json_config
 from rastervision.protos.chain_workflow_pb2 import ChainWorkflowConfig
 
@@ -17,35 +20,15 @@ class ChainWorkflowPaths():
     def __init__(self, base_uri, compute_stats_uri=None, make_chips_uri=None,
                  train_uri=None, predict_uri=None, eval_uri=None,
                  workflow_uri=None):
-        self.compute_stats_uri = compute_stats_uri
-        if not compute_stats_uri:
-            self.compute_stats_uri = join(base_uri, COMPUTE_STATS)
-        self.stats_uri = join(self.compute_stats_uri, 'stats.json')
+        self.compute_stats_uri = (compute_stats_uri if compute_stats_uri else join(base_uri, COMPUTE_STATS))
+        self.make_chips_uri = (make_chips_uri if make_chips_uri else join(base_uri, MAKE_CHIPS))
+        self.train_uri = (train_uri if train_uri else join(base_uri, TRAIN))
+        self.predict_uri = (predict_uri if predict_uri else join(base_uri, PREDICT))
+        self.eval_uri = (eval_uri if eval_uri else join(base_uri, EVAL))
+        self.workflow_uri = (workflow_uri if workflow_uri else join(base_uri, 'workflow.json'))
 
-        if not make_chips_uri:
-            self.make_chips_uri = join(base_uri, MAKE_CHIPS)
-
-        if not train_uri:
-            self.train_uri = join(base_uri, TRAIN)
-        self.model_uri = join(self.train_uri, 'model')
-
-        if not predict_uri:
-            self.predict_uri = join(base_uri, PREDICT)
-        self.prediction_package_uri = join(
-            self.predict_uri, 'prediction-package.zip')
-
-        if not eval_uri:
-            self.eval_uri = join(base_uri, EVAL)
-        self.metrics_uri = join(self.eval_uri, 'metrics.json')
-
-        if not workflow_uri:
-            self.workflow_uri = join(base_uri, 'workflow.json')
-
-    def get_config_uri(self, uri):
-        return join(uri, 'config.json')
-
-    def get_debug_uri(self, uri):
-        return join(uri, 'debug')
+    def get_config_uri(self, command, uri):
+        return join(uri, command + '-config.json')
 
 
 class ChainWorkflowSceneGenerator():
@@ -53,52 +36,76 @@ class ChainWorkflowSceneGenerator():
         self.paths = paths
         self.chip_size = chip_size
 
-    def make_classification_geotiff_geojson_scene(
+    def make_geotiff_geojson_scene(
             self,
             id,
             raster_uris,
+            task_options,
             ground_truth_labels_uri=None,
-            channel_order=[0, 1, 2],
-            ioa_thresh=0.5,
-            use_intersection_over_cell=False,
-            pick_min_class_id=True,
-            background_class_id=None,
-            infer_cells=True):
-        return make_classification_geotiff_geojson_scene(
+            channel_order=[0, 1, 2]):
+        if type(task_options) is int:
+            if task_options == OD:
+                task_options = None
+            elif task_options == CL:
+                task_options = ClassificationGeoJSONOptions()
+            else:
+                raise ValueError('Unknown task: ' + task_options)
+
+        if task_options is not None:
+            if type(task_options) is ClassificationGeoJSONOptions:
+                # Force cell_size to be consistent with rest of chain workflow.
+                task_options = copy.deepcopy(task_options)
+                task_options.cell_size = self.chip_size
+            else:
+                raise ValueError('Unknown type of task_options: ' +
+                                 str(type(task_options)))
+
+        return make_geotiff_geojson_scene(
             id,
             raster_uris,
-            self.paths.stats_uri,
-            self.chip_size,
+            make_stats_uri(self.paths.compute_stats_uri),
+            task_options,
             ground_truth_labels_uri=ground_truth_labels_uri,
             prediction_base_uri=self.paths.predict_uri,
-            channel_order=channel_order,
-            ioa_thresh=ioa_thresh,
-            use_intersection_over_cell=use_intersection_over_cell,
-            pick_min_class_id=pick_min_class_id,
-            background_class_id=background_class_id,
-            infer_cells=infer_cells)
+            channel_order=channel_order)
 
 
-class ChainWorkflow():
+class ChainWorkflow(object):
     def __init__(
             self,
             paths,
             model_config,
             train_scenes,
             validation_scenes,
+            backend_config_uri,
+            pretrained_model_uri,
+            sync_interval=600,
+            test_scenes=None,
             chip_size=300,
-            debug=True):
+            debug=True,
+            task_make_chips_options=None,
+            task_predict_options=None):
         self.paths = paths
         self.model_config = model_config
         self.train_scenes = train_scenes
         self.validation_scenes = validation_scenes
+        self.backend_config_uri = backend_config_uri
+        self.pretrained_model_uri = pretrained_model_uri
+        self.sync_interval = sync_interval
+        self.test_scenes = [] if test_scenes is None else test_scenes
         self.chip_size = chip_size
         self.debug = debug
+        self.task_make_chips_options = (
+            model_config.task if task_make_chips_options is None
+            else task_make_chips_options)
+        self.task_predict_options = (
+            model_config.task if task_predict_options is None
+            else task_predict_options)
 
     def make_compute_stats(self):
-        scenes = self.train_scenes + self.validation_scenes
+        scenes = self.train_scenes + self.validation_scenes + self.test_scenes
         raster_sources = [scene.raster_source for scene in scenes]
-        return make_compute_stats(raster_sources, self.paths.stats_uri)
+        return make_compute_stats(raster_sources, self.paths.compute_stats_uri)
 
     def make_make_chips(self):
         return make_make_chips(
@@ -107,34 +114,34 @@ class ChainWorkflow():
             self.model_config,
             self.paths.make_chips_uri,
             chip_size=self.chip_size,
-            debug=self.debug)
+            debug=self.debug,
+            task_options=self.task_make_chips_options)
 
     def make_train(self):
         return make_train(
             self.model_config,
+            self.backend_config_uri,
             self.paths.make_chips_uri,
-            self.paths.train_uri)
+            self.paths.train_uri,
+            self.pretrained_model_uri,
+            self.sync_interval)
 
     def make_predict(self):
         return make_predict(
             self.model_config,
-            self.validation_scenes,
+            self.validation_scenes + self.test_scenes,
             self.chip_size,
-            self.paths.model_uri,
-            self.paths.prediction_package_uri,
-            self.debug,
-            self.paths.get_debug_uri(self.paths.predict_uri))
+            self.paths.train_uri,
+            self.paths.predict_uri,
+            debug=self.debug,
+            task_options=self.task_predict_options)
 
     def make_eval(self):
-        scenes = [
-            scene for scene in self.validation_scenes
-            if scene.HasField('ground_truth_label_store')
-        ]
         return make_eval(
             self.model_config,
-            scenes,
-            self.paths.metrics_uri,
-            self.debug)
+            self.validation_scenes,
+            self.paths.eval_uri,
+            debug=self.debug)
 
     def save_config(self):
         config = ChainWorkflowConfig()
@@ -143,6 +150,7 @@ class ChainWorkflow():
         config.chip_size = self.chip_size
         config.train_scenes.extend(self.train_scenes)
         config.validation_scenes.extend(self.validation_scenes)
+        config.test_scenes.extend(self.test_scenes)
 
         config.compute_stats_uri = self.paths.compute_stats_uri
         config.make_chips_uri = self.paths.make_chips_uri

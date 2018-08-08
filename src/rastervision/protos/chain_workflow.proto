@@ -16,6 +16,7 @@ message ChainWorkflowConfig {
     required int32 chip_size = 2;
     repeated Scene train_scenes = 3;
     repeated Scene validation_scenes = 4;
+    repeated Scene test_scenes = 15;    
 
     // Output directories for commands
     required string compute_stats_uri = 5;

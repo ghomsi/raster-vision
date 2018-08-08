@@ -1,24 +1,23 @@
 from rastervision.workflows.config_utils import (
-    make_model_config, CL)
+    make_model_config, CL, OD)
 from rastervision.workflows.chain_utils import (
-    ChainWorkflowPaths, ChainWorkflowSceneGenerator, ChainWorkflow)
+    ChainWorkflowPaths, ChainWorkflowSceneGenerator,
+    ChainWorkflow)
 
 
 def main():
     base_uri = '/opt/data/lf-dev/workflow-dreams/'
+    task = OD
+    backend_config_uri = ''
+    pretrained_model_uri = ''
     paths = ChainWorkflowPaths(base_uri)
-    chip_size = 300
-    debug = True
-    model_config = make_model_config(
-        ['car', 'building'], CL)
-    scene_generator = ChainWorkflowSceneGenerator(paths, chip_size=chip_size)
+    model_config = make_model_config(['car'], task)
+    scene_generator = ChainWorkflowSceneGenerator(paths)
 
-    def make_scene(id, raster_uris, ground_truth_labels_uri=None):
-        return scene_generator.make_classification_geotiff_geojson_scene(
-            id,
-            raster_uris,
-            ground_truth_labels_uri=ground_truth_labels_uri,
-            channel_order=[2, 1, 0])
+    def make_scene(id, raster_uris, ground_truth_labels_uri):
+        return scene_generator.make_geotiff_geojson_scene(
+            id, raster_uris, task,
+            ground_truth_labels_uri=ground_truth_labels_uri)
 
     train_scenes = [
         make_scene('2-10', ['/test/2-10.tif'], '/test/2-10.json'),
@@ -30,7 +29,7 @@ def main():
 
     workflow = ChainWorkflow(
         paths, model_config, train_scenes, validation_scenes,
-        chip_size=chip_size, debug=debug)
+        backend_config_uri, pretrained_model_uri)
     workflow.save_config()
 
 
